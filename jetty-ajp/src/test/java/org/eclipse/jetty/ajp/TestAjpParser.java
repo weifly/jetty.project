@@ -64,7 +64,7 @@ public class TestAjpParser
         Ajp13Parser parser = new Ajp13Parser(buffers,endp);
         parser.setEventHandler(new EH());
         parser.setGenerator(new Ajp13Generator(buffers,endp));
-        parser.parse();
+        parser.parseAvailable();
         assertTrue(true);
     }
 
@@ -106,7 +106,7 @@ public class TestAjpParser
     @Test
     public void testSSLPacketWithStringKeySize() throws Exception
     {
-        String packet = "1234025002020008485454502f312e3100000f2f746573742f64756d702f696e666f00000e3139322e3136382e3130302e343000ffff000c776562746964652d746573740001bb01000ca00b000c776562746964652d7465737400a00e005a4d6f7a696c6c612f352e30202857696e646f77733b20553b2057696e646f7773204e5420352e313b20656e2d55533b2072763a312e382e312e3129204765636b6f2f32303036313230342046697265666f782f322e302e302e3100a0010063746578742f786d6c2c6170706c69636174696f6e2f786d6c2c6170706c69636174696f6e2f7868746d6c2b786d6c2c746578742f68746d6c3b713d302e392c746578742f706c61696e3b713d302e382c696d6167652f706e672c2a2f2a3b713d302e3500a004000e656e2d75732c656e3b713d302e3500a003000c677a69702c6465666c61746500a002001e49534f2d383835392d312c7574662d383b713d302e372c2a3b713d302e3700000a4b6565702d416c69766500000333303000a006000a6b6565702d616c69766500a00d001a68747470733a2f2f776562746964652d746573742f746573742f00a00900174a53455353494f4e49443d69326c6e307539773573387300000d43616368652d436f6e74726f6c0000096d61782d6167653d3000000c4d61782d466f7277617264730000023130000800124448452d5253412d4145533235362d5348410009004032413037364245323330433238393130383941414132303631344139384441443131314230323132343030374130363642454531363742303941464337383942000b000332353600ff";
+        String packet = "1234025402020008485454502f312e3100000f2f746573742f64756d702f696e666f00000e3139322e3136382e3130302e343000ffff000c776562746964652d746573740001bb01000ca00b000c776562746964652d7465737400a00e005a4d6f7a696c6c612f352e30202857696e646f77733b20553b2057696e646f7773204e5420352e313b20656e2d55533b2072763a312e382e312e3129204765636b6f2f32303036313230342046697265666f782f322e302e302e3100a0010063746578742f786d6c2c6170706c69636174696f6e2f786d6c2c6170706c69636174696f6e2f7868746d6c2b786d6c2c746578742f68746d6c3b713d302e392c746578742f706c61696e3b713d302e382c696d6167652f706e672c2a2f2a3b713d302e3500a004000e656e2d75732c656e3b713d302e3500a003000c677a69702c6465666c61746500a002001e49534f2d383835392d312c7574662d383b713d302e372c2a3b713d302e3700000a4b6565702d416c69766500000333303000a006000a6b6565702d616c69766500a00d001a68747470733a2f2f776562746964652d746573742f746573742f00a00900174a53455353494f4e49443d69326c6e307539773573387300000d43616368652d436f6e74726f6c0000096d61782d6167653d3000000c4d61782d466f7277617264730000023130000800124448452d5253412d4145533235362d5348410009004032413037364245323330433238393130383941414132303631344139384441443131314230323132343030374130363642454531363742303941464337383942000b000332353600ff";
         byte[] src = TypeUtil.fromHexString(packet);
 
         ByteArrayBuffer buffer= new ByteArrayBuffer(Ajp13Packet.MAX_PACKET_SIZE);
@@ -129,28 +129,16 @@ public class TestAjpParser
         String packet = "1234025002020008485454502f312e3100000f2f746573742f64756d702f696e666f00000e3139322e3136382e3130302e343000ffff000c776562746964652d746573740001bb01000ca00b000c776562746964652d7465737400a00e005a4d6f7a696c6c612f352e30202857696e646f77733b20553b2057696e646f7773204e5420352e313b20656e2d55533b2072763a312e382e312e3129204765636b6f2f32303036313230342046697265666f782f322e302e302e3100a0010063746578742f786d6c2c6170706c69636174696f6e2f786d6c2c6170706c69636174696f6e2f7868746d6c2b786d6c2c746578742f68746d6c3b713d302e392c746578742f706c61696e3b713d302e382c696d6167652f706e672c2a2f2a3b713d302e3500a004000e656e2d75732c656e3b713d302e3500a003000c677a69702c6465666c61746500a002001e49534f2d383835392d312c7574662d383b713d302e372c2a3b713d302e3700000a4b6565702d416c69766500000333303000a006000a6b6565702d616c69766500a00d001a68747470733a2f2f776562746964652d746573742f746573742f00a00900174a53455353494f4e49443d69326c6e307539773573387300000d43616368652d436f6e74726f6c0000096d61782d6167653d3000000c4d61782d466f7277617264730000023130000800124448452d5253412d4145533235362d5348410009004032413037364245323330433238393130383941414132303631344139384441443131314230323132343030374130363642454531363742303941464337383942000b0100ff";
         byte[] src = TypeUtil.fromHexString(packet);
 
-        for (int f=1;f<src.length;f++)
-        {
-            byte[] frag0=new byte[src.length-f];
-            byte[] frag1=new byte[f];
+        ByteArrayBuffer buffer= new ByteArrayBuffer(Ajp13Packet.MAX_PACKET_SIZE);
+        SimpleBuffers buffers=new SimpleBuffers(buffer,null);
 
-            System.arraycopy(src,0,frag0,0,src.length-f);
-            System.arraycopy(src,src.length-f,frag1,0,f);
+        ByteArrayEndPoint endp = new ByteArrayEndPoint(src,Ajp13Packet.MAX_PACKET_SIZE);
+        endp.setNonBlocking(true);
 
-            ByteArrayBuffer buffer= new ByteArrayBuffer(Ajp13Packet.MAX_PACKET_SIZE);
-            SimpleBuffers buffers=new SimpleBuffers(buffer,null);
-
-            ByteArrayEndPoint endp = new ByteArrayEndPoint(frag0,Ajp13Packet.MAX_PACKET_SIZE);
-            endp.setNonBlocking(true);
-
-            Ajp13Parser parser = new Ajp13Parser(buffers,endp);
-            parser.setEventHandler(new EH());
-            parser.setGenerator(new Ajp13Generator(buffers,endp));
-            parser.parseNext();
-
-            endp.setIn(new ByteArrayBuffer(frag1));
-            parser.parseAvailable();
-        }
+        Ajp13Parser parser = new Ajp13Parser(buffers,endp);
+        parser.setEventHandler(new EH());
+        parser.setGenerator(new Ajp13Generator(buffers,endp));
+        parser.parseAvailable();
 
         assertTrue(true);
     }
@@ -186,7 +174,7 @@ public class TestAjpParser
 
         parser.parseNext();
         assertEquals(1,parser.getState());
-        assertEquals(1,count[0]);
+        assertEquals(0,count[0]);
 
         endp.setIn(new ByteArrayBuffer(TypeUtil.fromHexString(getTestTinyBody())));
 
@@ -223,25 +211,25 @@ public class TestAjpParser
 
         parser.parseNext();
         assertEquals(1,parser.getState());
-        assertEquals(1,count[0]);
+        assertEquals(0,count[0]);
 
         endp.setIn(new ByteArrayBuffer(TypeUtil.fromHexString("1234007e007c7468656e616d653d746865253230717569636b25323062726f776e253230666f782532306a756d70732532306f766572253230746f2532307468652532306c617a79253230646f67253230544845253230515549434b25323042524f574e253230464f582532304a554d50532532304f564552253230544f25323054")));
 
-        while (parser.parseNext()>0);
+        parser.parseNext();
         assertEquals(1,parser.getState());
-        assertEquals(2,count[0]);
+        assertEquals(0,count[0]);
 
         endp.setIn(new ByteArrayBuffer(TypeUtil.fromHexString("12340042004048452532304c415a59253230444f472532302676616c75656f66323d6162636465666768696a6b6c6d6e6f707172737475767778797a31323334353637383930")));
 
-        while (parser.parseNext()>0);
+        parser.parseNext();
         assertEquals(1,parser.getState());
-        assertEquals(3,count[0]);
+        assertEquals(1,count[0]);
 
         endp.setIn(new ByteArrayBuffer(TypeUtil.fromHexString("123400020000")));
 
-        while (parser.getState()!=0 && parser.parseNext()>0);
+        parser.parseNext();
         assertEquals(0,parser.getState());
-        assertEquals(3,count[0]);
+        assertEquals(2,count[0]);
 
         assertTrue(true);
     }
@@ -252,28 +240,16 @@ public class TestAjpParser
         String packet = "123401070202000f77696474683d20485454502f312e300000122f636f6e74726f6c2f70726f647563742f2200000e3230382e32372e3230332e31323800ffff000c7777772e756c74612e636f6d000050000005a006000a6b6565702d616c69766500a00b000c7777772e756c74612e636f6d00a00e002b4d6f7a696c6c612f342e302028636f6d70617469626c653b20426f726465724d616e6167657220332e302900a0010043696d6167652f6769662c20696d6167652f782d786269746d61702c20696d6167652f6a7065672c20696d6167652f706a7065672c20696d6167652f706d672c202a2f2a00a008000130000600067570726f64310008000a4145533235362d53484100ff";
         byte[] src = TypeUtil.fromHexString(packet);
 
-        for (int f=1;f<src.length;f++)
-        {
-            byte[] frag0=new byte[src.length-f];
-            byte[] frag1=new byte[f];
+        ByteArrayBuffer buffer= new ByteArrayBuffer(Ajp13Packet.MAX_PACKET_SIZE);
+        SimpleBuffers buffers=new SimpleBuffers(buffer,null);
 
-            System.arraycopy(src,0,frag0,0,src.length-f);
-            System.arraycopy(src,src.length-f,frag1,0,f);
+        ByteArrayEndPoint endp = new ByteArrayEndPoint(src,Ajp13Packet.MAX_PACKET_SIZE);
+        endp.setNonBlocking(true);
 
-            ByteArrayBuffer buffer= new ByteArrayBuffer(Ajp13Packet.MAX_PACKET_SIZE);
-            SimpleBuffers buffers=new SimpleBuffers(buffer,null);
-
-            ByteArrayEndPoint endp = new ByteArrayEndPoint(frag0,Ajp13Packet.MAX_PACKET_SIZE);
-            endp.setNonBlocking(true);
-
-            Ajp13Parser parser = new Ajp13Parser(buffers,endp);
-            parser.setEventHandler(new EH());
-            parser.setGenerator(new Ajp13Generator(buffers,endp));
-            parser.parseNext();
-
-            endp.setIn(new ByteArrayBuffer(frag1));
-            parser.parseAvailable();
-        }
+        Ajp13Parser parser = new Ajp13Parser(buffers,endp);
+        parser.setEventHandler(new EH());
+        parser.setGenerator(new Ajp13Generator(buffers,endp));
+        parser.parseAvailable();
 
         assertTrue(true);
     }
@@ -284,28 +260,16 @@ public class TestAjpParser
         String packet = getTestHeader()+getTestBody();
         byte[] src = TypeUtil.fromHexString(packet);
 
-        for (int f=1;f<src.length;f++)
-        {
-            byte[] frag0=new byte[src.length-f];
-            byte[] frag1=new byte[f];
+        ByteArrayBuffer buffer= new ByteArrayBuffer(Ajp13Packet.MAX_PACKET_SIZE);
+        SimpleBuffers buffers=new SimpleBuffers(buffer,null);
 
-            System.arraycopy(src,0,frag0,0,src.length-f);
-            System.arraycopy(src,src.length-f,frag1,0,f);
+        ByteArrayEndPoint endp = new ByteArrayEndPoint(src,Ajp13Packet.MAX_PACKET_SIZE);
+        endp.setNonBlocking(true);
 
-            ByteArrayBuffer buffer= new ByteArrayBuffer(Ajp13Packet.MAX_PACKET_SIZE);
-            SimpleBuffers buffers=new SimpleBuffers(buffer,null);
-
-            ByteArrayEndPoint endp = new ByteArrayEndPoint(frag0,Ajp13Packet.MAX_PACKET_SIZE);
-            endp.setNonBlocking(true);
-
-            Ajp13Parser parser = new Ajp13Parser(buffers,endp);
-            parser.setEventHandler(new EH());
-            parser.setGenerator(new Ajp13Generator(buffers,endp));
-            parser.parseNext();
-
-            endp.setIn(new ByteArrayBuffer(frag1));
-            parser.parseAvailable();
-        }
+        Ajp13Parser parser = new Ajp13Parser(buffers,endp);
+        parser.setEventHandler(new EH());
+        parser.setGenerator(new Ajp13Generator(buffers,endp));
+        parser.parseAvailable();
 
         assertTrue(true);
     }

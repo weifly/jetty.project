@@ -108,10 +108,6 @@ public class Ajp13Generator extends AbstractGenerator
     }
 
     /* ------------------------------------------------------------ */
-    private boolean _expectMore = false;
-
-    private boolean _needMore = false;
-
     private boolean _needEOC = false;
 
     private boolean _bufferPrepared = false;
@@ -143,8 +139,6 @@ public class Ajp13Generator extends AbstractGenerator
         super.reset();
 
         _needEOC = false;
-        _needMore = false;
-        _expectMore = false;
         _bufferPrepared = false;
         _last = false;
 
@@ -447,7 +441,7 @@ public class Ajp13Generator extends AbstractGenerator
     {
         try
         {
-            if (_state == STATE_HEADER && !_expectMore)
+            if (_state == STATE_HEADER)
                 throw new IllegalStateException("State==HEADER");
             prepareBuffers();
 
@@ -459,7 +453,7 @@ public class Ajp13Generator extends AbstractGenerator
                 // if(!_hasSentEOC)
                 // _buffer.put(AJP13_MORE_CONTENT);
                 // }
-                if (!_expectMore && _needEOC && _buffer != null)
+                if (_needEOC && _buffer != null)
                 {
                     _buffer.put(AJP13_END_RESPONSE);
                 }
@@ -538,7 +532,7 @@ public class Ajp13Generator extends AbstractGenerator
                         }
 
                         // Are we completely finished for now?
-                        if (!_expectMore && !_needEOC && (_content == null || _content.length() == 0))
+                        if (!_needEOC && (_content == null || _content.length() == 0))
                         {
                             if (_state == STATE_FLUSHING)
                                 _state = STATE_END;
@@ -636,31 +630,7 @@ public class Ajp13Generator extends AbstractGenerator
                 }
             }
 
-            if (_needMore)
-            {
-
-                if (_header == null)
-                {
-                    _header = _buffers.getHeader();
-                }
-
-                if (_buffer == null && _header != null && _header.space() >= AJP13_MORE_CONTENT.length)
-                {
-                    _header.put(AJP13_MORE_CONTENT);
-                    _needMore = false;
-                }
-                else if (_buffer != null && _buffer.space() >= AJP13_MORE_CONTENT.length)
-                {
-                    // send closing packet if all contents
-                    // are added
-                    _buffer.put(AJP13_MORE_CONTENT);
-                    _needMore = false;
-                    _bufferPrepared = true;
-                }
-
-            }
-
-            if (!_expectMore && _needEOC)
+            if (_needEOC)
             {
                 if (_buffer == null && _header.space() >= AJP13_END_RESPONSE.length)
                 {
@@ -685,7 +655,7 @@ public class Ajp13Generator extends AbstractGenerator
     @Override
     public boolean isComplete()
     {
-        return !_expectMore && _state == STATE_END;
+        return _state == STATE_END;
     }
 
     /* ------------------------------------------------------------ */
@@ -750,33 +720,44 @@ public class Ajp13Generator extends AbstractGenerator
     public void getBodyChunk() throws IOException
     {
         ByteArrayBuffer bf = new ByteArrayBuffer(AJP13_MORE_CONTENT);
-        _endp.flush(bf);
+        do
+        {
+            _endp.flush(bf);
+        }
+        while (bf.length() > 0);
     }
 
     /* ------------------------------------------------------------ */
     public void gotBody()
     {
-        _needMore = false;
-        _expectMore = false;
+
     }
 
     /* ------------------------------------------------------------ */
     public void sendCPong() throws IOException
     {
-
-        Buffer buff = _buffers.getBuffer();
-        buff.put(AJP13_CPONG_RESPONSE);
-
-        // flushing cpong response
-        do
+        Buffer buff = null;
+        try
         {
-            _endp.flush(buff);
+            buff = _buffers.getBuffer();
+            buff.put(AJP13_CPONG_RESPONSE);
+
+            // flushing cpong response
+            do
+            {
+                _endp.flush(buff);
+            }
+            while (buff.length() > 0);
+
+            reset();
         }
-        while (buff.length() > 0);
-        _buffers.returnBuffer(buff);
-
-        reset();
-
+        finally
+        {
+            if(buff!=null)
+            {
+                _buffers.returnBuffer(buff);
+            }
+        }
     }
 
 }

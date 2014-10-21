@@ -28,6 +28,7 @@ import org.eclipse.jetty.http.Parser;
 import org.eclipse.jetty.io.Buffer;
 import org.eclipse.jetty.io.BufferUtil;
 import org.eclipse.jetty.io.Buffers;
+import org.eclipse.jetty.io.ByteArrayBuffer;
 import org.eclipse.jetty.io.EndPoint;
 import org.eclipse.jetty.io.EofException;
 import org.eclipse.jetty.io.View;
@@ -43,28 +44,23 @@ public class Ajp13Parser implements Parser
 
     private final static int STATE_START = -1;
     private final static int STATE_END = 0;
-    private final static int STATE_AJP13CHUNK_START = 1;
-    private final static int STATE_AJP13CHUNK = 2;
+    private final static int STATE_AJP13CHUNK = 1;
 
     private int _state = STATE_START;
     private long _contentLength;
     private long _contentPosition;
-    private int _chunkLength;
-    private int _chunkPosition;
-    private int _headers;
     private Buffers _buffers;
     private EndPoint _endp;
-    private Buffer _buffer;
-    private Buffer _header; // Buffer for header data (and small _content)
+    private Buffer _header; // Buffer for header data
     private Buffer _body; // Buffer for large content
+    private ByteArrayBuffer _lowBuffer = new ByteArrayBuffer(Ajp13Packet.MAX_PACKET_SIZE);
     private View _contentView = new View();
     private EventHandler _handler;
     private Ajp13Generator _generator;
     private View _tok0; // Saved token: header name, request method or response version
     private View _tok1; // Saved token: header value, request URI orresponse code
-    protected int _length;
-    protected int _packetLength;
-    
+    private int _packetLength;
+    private boolean _firstBody = true;
 
     /* ------------------------------------------------------------------------------- */
     public Ajp13Parser(Buffers buffers, EndPoint endPoint)
@@ -158,453 +154,465 @@ public class Ajp13Parser implements Parser
         boolean progress=parseNext()>0;
         
         // continue parsing
-        while (!isComplete() && _buffer!=null && _buffer.length()>0)
+        while (!isComplete() && haveContent())
         {
             progress |= parseNext()>0;
         }
         return progress;
     }
 
-    /* ------------------------------------------------------------------------------- */
-    private int fill() throws IOException
+    private boolean haveContent()
     {
-        int filled = -1;
-        if (_body != null && _buffer != _body)
+        if(_state==STATE_START)
         {
-            // mod_jk implementations may have some partial data from header
-            // check if there are partial contents in the header
-            // copy it to the body if there are any
-            if(_header.length() > 0)
-            {
-                // copy the patial data from the header to the body
-                _body.put(_header);
-            }
-
-            _buffer = _body;
-            
-            if (_buffer.length()>0)
-            {            
-                filled = _buffer.length();
-                return filled;
-            }
+            return (_header!=null && _header.length()>0);
         }
+        if(_state==STATE_AJP13CHUNK)
+        {
+            return (_body!=null && _body.length()>0);
+        }
+        return false;
+    }
 
-        if (_buffer.markIndex() == 0 && _buffer.putIndex() == _buffer.capacity())
+    /* ------------------------------------------------------------------------------- */
+    private int fill(Buffer bf, int size) throws IOException
+    {
+        if (bf.putIndex() == bf.capacity())
+        {
             throw new IOException("FULL");
-        if (_endp != null && filled <= 0)
+        }
+        if(bf.space()<size)
         {
-            // Compress buffer if handling _content buffer
-            // TODO check this is not moving data too much
-            if (_buffer == _body)
-                _buffer.compact();
+            throw new IOException("not enough space, expect " + size + ", but only " + bf.space());
+        }
 
-            if (_buffer.space() == 0)
-                throw new IOException("FULL");
+        int filled = 0;
+        if (_endp != null)
+        {
+            while(filled < size)
+            {
+                // read from low endpoint
+                if(_lowBuffer.length() <= 0)
+                {
+                    _lowBuffer.clear();
+                    int got = 0;
+                    try
+                    {
+                        got = _endp.fill(_lowBuffer);
+                    }
+                    catch(IOException e)
+                    {
+                        if(filled > 0)
+                        {
+                            LOG.info("Error reading data after "+filled+"bytes", e);
+                        }
+                        else
+                        {
+                            LOG.debug("Error reading data", e);
+                        }
+                        reset();
+                        throw (e instanceof EofException) ? e : new EofException(e);
+                    }
+                    if(got<0)
+                    {
+                        // This happens periodically, as apache restarts periodically.
+                        if(filled > 0)
+                        {
+                            LOG.info("EOF reached after "+filled+"bytes");
+                        }
+                        else
+                        {
+                            LOG.debug("EOF reached");
+                        }
+                        reset();
+                        return got;
+                    }
+                }
 
-            try
-            {
-                filled = _endp.fill(_buffer);
-            }
-            catch (IOException e)
-            {
-                // This is normal in AJP since the socket closes on timeout only
-                LOG.debug(e);
-                reset();
-                throw (e instanceof EofException) ? e : new EofException(e);
+                // copy bytes to bf
+                if(_lowBuffer.length()>0)
+                {
+                    int copy = _lowBuffer.length();
+                    if(copy > (size-filled)){
+                        copy = size - filled;
+                    }
+                    bf.put(_lowBuffer.array(), _lowBuffer.getIndex(), copy);
+                    _lowBuffer.skip(copy);
+                    filled = filled + copy;
+                }
             }
         }
-        
-        if (filled < 0)
-        {
-            if (_state > STATE_END)
-            {
-                _state = STATE_END;
-                _handler.messageComplete(_contentPosition);
-                return filled;
-            }
-            reset();
-            throw new EofException();
-        }
-    
+
         return filled;
     }
-    
-    volatile int _seq=0;
+
+    private void printStatus(String msg){
+        StringBuilder sb = new StringBuilder();
+
+        sb.append("Thread=").append(Thread.currentThread().getName()).append(",");
+
+        if(msg!=null)
+        {
+            sb.append(msg).append(",");
+        }
+
+        sb.append("status=");
+        if(this._state==STATE_START)
+        {
+            sb.append("STATE_START");
+        }
+        else if(this._state==STATE_END)
+        {
+            sb.append("STATE_END");
+        }
+        else if(this._state==STATE_AJP13CHUNK)
+        {
+            sb.append("STATE_AJP13CHUNK");
+        }
+        sb.append(",");
+
+        sb.append("header=");
+        if(this._header==null)
+        {
+            sb.append("null");
+        }
+        else
+        {
+            sb.append(this._header.length());
+        }
+        sb.append(",");
+
+        sb.append("body=");
+        if(this._body==null)
+        {
+            sb.append("null");
+        }
+        else
+        {
+            sb.append(this._body.length());
+        }
+        sb.append(",");
+
+        sb.append("low=").append(this._lowBuffer.length());
+
+        LOG.debug(sb.toString());
+    }
+
     /* ------------------------------------------------------------------------------- */
     public int parseNext() throws IOException
     {
-        int total_filled = 0;
-
-        if (_buffer == null)
+        if(_state==STATE_START)
         {
-            if (_header == null)
-                _header = _buffers.getHeader();
-           
-            _buffer = _header;
-            _tok0 = new View(_header);
-            _tok1 = new View(_header);
-            _tok0.setPutIndex(_tok0.getIndex());
-            _tok1.setPutIndex(_tok1.getIndex());
+            return this.parseServerPacket();
         }
 
-        if (_state == STATE_END)
+        if(_state==STATE_END)
+        {
             throw new IllegalStateException("STATE_END");
-        if (_state > STATE_END && _contentPosition == _contentLength)
+        }
+
+        if(_state==STATE_AJP13CHUNK)
+        {
+            return this.parseBodyPacket();
+        }
+
+        throw new IllegalStateException("unknown STATE: " + _state);
+    }
+
+    private int parseServerPacket() throws IOException {
+        int total_filled = 0;
+
+        // init buffer
+        if(_header==null)
+        {
+            _header = _buffers.getBuffer();
+        }
+        if(_body==null)
+        {
+            _body = _buffers.getBuffer();
+        }
+        _tok0 = new View(_header);
+        _tok1 = new View(_header);
+        _tok0.setPutIndex(_tok0.getIndex());
+        _tok1.setPutIndex(_tok1.getIndex());
+        _contentLength = HttpTokens.UNKNOWN_CONTENT;
+
+        total_filled = this.readOnePacket(_header);
+        if(total_filled<0)
+        {
+            // remote connection closed
+            return -1;
+        }
+
+        // Parse Header
+        Buffer bufHeaderName = null;
+        Buffer bufHeaderValue = null;
+        int attr_type = 0;
+
+        byte packetType = Ajp13RequestPacket.getByte(_header);
+
+        switch (packetType)
+        {
+            case Ajp13Packet.FORWARD_REQUEST_ORDINAL:
+                _handler.startForwardRequest();
+                break;
+            case Ajp13Packet.CPING_REQUEST_ORDINAL:
+                _generator.sendCPong();
+                reset();
+                return -1;
+            case Ajp13Packet.SHUTDOWN_ORDINAL:
+                shutdownRequest();
+                return -1;
+            default:
+                // XXX Throw an Exception here?? Close
+                // connection!
+                LOG.warn("AJP13 message type ({PING}: "+packetType+" ) not supported/recognized as an AJP request");
+                throw new IllegalStateException("PING is not implemented");
+        }
+
+        _handler.parsedMethod(Ajp13RequestPacket.getMethod(_header));
+        _handler.parsedProtocol(Ajp13RequestPacket.getString(_header, _tok0));
+        _handler.parsedUri(Ajp13RequestPacket.getString(_header, _tok1));
+        _handler.parsedRemoteAddr(Ajp13RequestPacket.getString(_header, _tok1));
+        _handler.parsedRemoteHost(Ajp13RequestPacket.getString(_header, _tok1));
+        _handler.parsedServerName(Ajp13RequestPacket.getString(_header, _tok1));
+        _handler.parsedServerPort(Ajp13RequestPacket.getInt(_header));
+        _handler.parsedSslSecure(Ajp13RequestPacket.getBool(_header));
+
+        int headers = Ajp13RequestPacket.getInt(_header);
+        for (int h=0;h<headers;h++)
+        {
+            bufHeaderName = Ajp13RequestPacket.getHeaderName(_header, _tok0);
+            bufHeaderValue = Ajp13RequestPacket.getString(_header, _tok1);
+
+            if (bufHeaderName != null && bufHeaderName.toString().equals(Ajp13RequestHeaders.CONTENT_LENGTH))
+            {
+                _contentLength = BufferUtil.toLong(bufHeaderValue);
+                if (_contentLength == 0)
+                {
+                    _contentLength = HttpTokens.NO_CONTENT;
+                }
+            }
+
+            _handler.parsedHeader(bufHeaderName, bufHeaderValue);
+        }
+
+        attr_type = Ajp13RequestPacket.getByte(_header) & 0xff;
+        while (attr_type != 0xFF)
+        {
+            switch (attr_type)
+            {
+                // XXX How does this plug into the web
+                // containers
+                // authentication?
+
+                case Ajp13RequestHeaders.REMOTE_USER_ATTR:
+                    _handler.parsedRemoteUser(Ajp13RequestPacket.getString(_header, _tok1));
+                    break;
+                case Ajp13RequestHeaders.AUTH_TYPE_ATTR:
+                    //XXX JASPI how does this make sense?
+                    _handler.parsedAuthorizationType(Ajp13RequestPacket.getString(_header, _tok1));
+                    break;
+
+                case Ajp13RequestHeaders.QUERY_STRING_ATTR:
+                    _handler.parsedQueryString(Ajp13RequestPacket.getString(_header, _tok1));
+                    break;
+
+                case Ajp13RequestHeaders.JVM_ROUTE_ATTR:
+                    // moved to Eclipse naming usage
+                    // used in org.eclipse.jetty.servlet.HashSessionIdManager
+                    _handler.parsedRequestAttribute("org.eclipse.jetty.ajp.JVMRoute", Ajp13RequestPacket.getString(_header, _tok1));
+                    break;
+
+                case Ajp13RequestHeaders.SSL_CERT_ATTR:
+                    _handler.parsedSslCert(Ajp13RequestPacket.getString(_header, _tok1));
+                    break;
+
+                case Ajp13RequestHeaders.SSL_CIPHER_ATTR:
+                    _handler.parsedSslCipher(Ajp13RequestPacket.getString(_header, _tok1));
+                    // SslSocketConnector.customize()
+                    break;
+
+                case Ajp13RequestHeaders.SSL_SESSION_ATTR:
+                    _handler.parsedSslSession(Ajp13RequestPacket.getString(_header, _tok1));
+                    break;
+
+                case Ajp13RequestHeaders.REQUEST_ATTR:
+                    _handler.parsedRequestAttribute(Ajp13RequestPacket.getString(_header, _tok0).toString(), Ajp13RequestPacket.getString(_header, _tok1));
+                    break;
+
+                    // New Jk API?
+                    // Check if experimental or can they
+                    // assumed to be
+                    // supported
+                    
+                case Ajp13RequestHeaders.SSL_KEYSIZE_ATTR:
+                    
+                    // This has been implemented in AJP13 as either a string or a integer.
+                    // Servlet specs say javax.servlet.request.key_size must be an Integer
+                    
+                    // Does it look like a string containing digits?
+                    int length = Ajp13RequestPacket.getInt(_header);
+                    
+                    if (length>0 && length<16)
+                    {
+                        // this must be a string length rather than a key length
+                        _header.skip(-2);
+                        _handler.parsedSslKeySize(Integer.parseInt(Ajp13RequestPacket.getString(_header, _tok1).toString()));
+                    }
+                    else
+                        _handler.parsedSslKeySize(length);
+                    
+                    break;
+
+                    
+                    // Used to lock down jk requests with a
+                    // secreate
+                    // key.
+                    
+                case Ajp13RequestHeaders.SECRET_ATTR:
+                    // XXX Investigate safest way to
+                    // deal with
+                    // this...
+                    // should this tie into shutdown
+                    // packet?
+                    break;
+
+                case Ajp13RequestHeaders.STORED_METHOD_ATTR:
+                    // XXX Confirm this should
+                    // really overide
+                    // previously parsed method?
+                    // _handler.parsedMethod(Ajp13PacketMethods.CACHE.get(Ajp13RequestPacket.getString()));
+                    break;
+
+                case Ajp13RequestHeaders.CONTEXT_ATTR:
+                    _handler.parsedContextPath(Ajp13RequestPacket.getString(_header, _tok1));
+                    break;
+                case Ajp13RequestHeaders.SERVLET_PATH_ATTR:
+                    _handler.parsedServletPath(Ajp13RequestPacket.getString(_header, _tok1));
+
+                    break;
+                default:
+                    LOG.warn("Unsupported Ajp13 Request Attribute {}", new Integer(attr_type));
+                    break;
+            }
+
+            attr_type = Ajp13RequestPacket.getByte(_header) & 0xff;
+        }
+
+        _contentPosition = 0;
+        switch ((int) _contentLength)
+        {
+            case HttpTokens.NO_CONTENT:
+                _state = STATE_END;
+                _handler.headerComplete();
+                _handler.messageComplete(_contentPosition);
+                break;
+
+            case HttpTokens.UNKNOWN_CONTENT:
+                _state = STATE_AJP13CHUNK;
+                _handler.headerComplete(); // May recurse here!
+                break;
+
+            default:
+                _state = STATE_AJP13CHUNK;
+                _handler.headerComplete(); // May recurse here!
+                break;
+        }
+
+        return total_filled;
+    }
+
+    private int parseBodyPacket() throws IOException {
+        if (_contentPosition == _contentLength)
         {
             _state = STATE_END;
             _handler.messageComplete(_contentPosition);
             return 1;
         }
-        
-        if (_state < 0)
+
+        int total_filled = 0;
+
+        if(_firstBody)
         {
-            // have we seen a packet?
-            if (_packetLength<=0)
-            {
-                if (_buffer.length()<4)
-                {
-                    if (total_filled<0) 
-                        total_filled=0;
-                    total_filled+=fill();
-                    if (_buffer.length()<4)
-                        return total_filled;
-                }
-                
-                _contentLength = HttpTokens.UNKNOWN_CONTENT;
-                int _magic = Ajp13RequestPacket.getInt(_buffer);
-                if (_magic != Ajp13RequestHeaders.MAGIC)
-                    throw new IOException("Bad AJP13 rcv packet: " + "0x" + Integer.toHexString(_magic) + " expected " + "0x" + Integer.toHexString(Ajp13RequestHeaders.MAGIC) + " " + this);
-
-
-                _packetLength = Ajp13RequestPacket.getInt(_buffer);
-                if (_packetLength > Ajp13Packet.MAX_PACKET_SIZE)
-                    throw new IOException("AJP13 packet (" + _packetLength + "bytes) too large for buffer");
-                
-            }
-            
-            if (_buffer.length() < _packetLength)
-            {
-                if (total_filled<0) 
-                    total_filled=0;
-                total_filled+=fill();
-                if (_buffer.length() < _packetLength)
-                    return total_filled;
-            }
-
-            // Parse Header
-            Buffer bufHeaderName = null;
-            Buffer bufHeaderValue = null;
-            int attr_type = 0;
-
-            byte packetType = Ajp13RequestPacket.getByte(_buffer);
-            
-            switch (packetType)
-            {
-                case Ajp13Packet.FORWARD_REQUEST_ORDINAL:
-                    _handler.startForwardRequest();
-                    break;
-                case Ajp13Packet.CPING_REQUEST_ORDINAL:
-                    (_generator).sendCPong();
-                    
-                    if(_header != null)
-                    {
-                        _buffers.returnBuffer(_header);
-                        _header = null;
-                    }
-
-                    if(_body != null)
-                    {
-                        _buffers.returnBuffer(_body);
-                        _body = null;
-                    }
-
-                    _buffer= null;
-
-                    reset();
-
-                    return -1;
-                case Ajp13Packet.SHUTDOWN_ORDINAL:
-                    shutdownRequest();
-
-                    return -1;
-
-                default:
-                    // XXX Throw an Exception here?? Close
-                    // connection!
-                    LOG.warn("AJP13 message type ({PING}: "+packetType+" ) not supported/recognized as an AJP request");
-                throw new IllegalStateException("PING is not implemented");
-            }
-
-
-            _handler.parsedMethod(Ajp13RequestPacket.getMethod(_buffer));
-            _handler.parsedProtocol(Ajp13RequestPacket.getString(_buffer, _tok0));
-            _handler.parsedUri(Ajp13RequestPacket.getString(_buffer, _tok1));
-            _handler.parsedRemoteAddr(Ajp13RequestPacket.getString(_buffer, _tok1));
-            _handler.parsedRemoteHost(Ajp13RequestPacket.getString(_buffer, _tok1));
-            _handler.parsedServerName(Ajp13RequestPacket.getString(_buffer, _tok1));
-            _handler.parsedServerPort(Ajp13RequestPacket.getInt(_buffer));
-            _handler.parsedSslSecure(Ajp13RequestPacket.getBool(_buffer));
-
-
-            _headers = Ajp13RequestPacket.getInt(_buffer);
-
-            for (int h=0;h<_headers;h++)
-            {
-                bufHeaderName = Ajp13RequestPacket.getHeaderName(_buffer, _tok0);
-                bufHeaderValue = Ajp13RequestPacket.getString(_buffer, _tok1);
-
-                if (bufHeaderName != null && bufHeaderName.toString().equals(Ajp13RequestHeaders.CONTENT_LENGTH))
-                {
-                    _contentLength = BufferUtil.toLong(bufHeaderValue);
-                    if (_contentLength == 0)
-                        _contentLength = HttpTokens.NO_CONTENT;
-                }
-
-                _handler.parsedHeader(bufHeaderName, bufHeaderValue);
-            }
-
-
-
-            attr_type = Ajp13RequestPacket.getByte(_buffer) & 0xff;
-            while (attr_type != 0xFF)
-            {
-                switch (attr_type)
-                {
-                    // XXX How does this plug into the web
-                    // containers
-                    // authentication?
-
-                    case Ajp13RequestHeaders.REMOTE_USER_ATTR:
-                        _handler.parsedRemoteUser(Ajp13RequestPacket.getString(_buffer, _tok1));
-                        break;
-                    case Ajp13RequestHeaders.AUTH_TYPE_ATTR:
-                        //XXX JASPI how does this make sense?
-                        _handler.parsedAuthorizationType(Ajp13RequestPacket.getString(_buffer, _tok1));
-                        break;
-
-                    case Ajp13RequestHeaders.QUERY_STRING_ATTR:
-                        _handler.parsedQueryString(Ajp13RequestPacket.getString(_buffer, _tok1));
-                        break;
-
-                    case Ajp13RequestHeaders.JVM_ROUTE_ATTR:
-                        // moved to Eclipse naming usage
-                        // used in org.eclipse.jetty.servlet.HashSessionIdManager
-                        _handler.parsedRequestAttribute("org.eclipse.jetty.ajp.JVMRoute", Ajp13RequestPacket.getString(_buffer, _tok1));
-                        break;
-
-                    case Ajp13RequestHeaders.SSL_CERT_ATTR:
-                        _handler.parsedSslCert(Ajp13RequestPacket.getString(_buffer, _tok1));
-                        break;
-
-                    case Ajp13RequestHeaders.SSL_CIPHER_ATTR:
-                        _handler.parsedSslCipher(Ajp13RequestPacket.getString(_buffer, _tok1));
-                        // SslSocketConnector.customize()
-                        break;
-
-                    case Ajp13RequestHeaders.SSL_SESSION_ATTR:
-                        _handler.parsedSslSession(Ajp13RequestPacket.getString(_buffer, _tok1));
-                        break;
-
-                    case Ajp13RequestHeaders.REQUEST_ATTR:
-                        _handler.parsedRequestAttribute(Ajp13RequestPacket.getString(_buffer, _tok0).toString(), Ajp13RequestPacket.getString(_buffer, _tok1));
-                        break;
-
-                        // New Jk API?
-                        // Check if experimental or can they
-                        // assumed to be
-                        // supported
-                        
-                    case Ajp13RequestHeaders.SSL_KEYSIZE_ATTR:
-                        
-                        // This has been implemented in AJP13 as either a string or a integer.
-                        // Servlet specs say javax.servlet.request.key_size must be an Integer
-                        
-                        // Does it look like a string containing digits?
-                        int length = Ajp13RequestPacket.getInt(_buffer);
-                        
-                        if (length>0 && length<16)
-                        {
-                            // this must be a string length rather than a key length
-                            _buffer.skip(-2);
-                            _handler.parsedSslKeySize(Integer.parseInt(Ajp13RequestPacket.getString(_buffer, _tok1).toString()));
-                        }
-                        else
-                            _handler.parsedSslKeySize(length);
-                        
-                        break;
-
-                        
-                        // Used to lock down jk requests with a
-                        // secreate
-                        // key.
-                        
-                    case Ajp13RequestHeaders.SECRET_ATTR:
-                        // XXX Investigate safest way to
-                        // deal with
-                        // this...
-                        // should this tie into shutdown
-                        // packet?
-                        break;
-
-                    case Ajp13RequestHeaders.STORED_METHOD_ATTR:
-                        // XXX Confirm this should
-                        // really overide
-                        // previously parsed method?
-                        // _handler.parsedMethod(Ajp13PacketMethods.CACHE.get(Ajp13RequestPacket.getString()));
-                        break;
-
-
-                    case Ajp13RequestHeaders.CONTEXT_ATTR:
-                        _handler.parsedContextPath(Ajp13RequestPacket.getString(_buffer, _tok1));
-                        break;
-                    case Ajp13RequestHeaders.SERVLET_PATH_ATTR:
-                        _handler.parsedServletPath(Ajp13RequestPacket.getString(_buffer, _tok1));
-
-                        break;
-                    default:
-                        LOG.warn("Unsupported Ajp13 Request Attribute {}", new Integer(attr_type));
-                    break;
-                }
-
-                attr_type = Ajp13RequestPacket.getByte(_buffer) & 0xff;
-            }
-
-            _contentPosition = 0;
-            switch ((int) _contentLength)
-            {
-
-                case HttpTokens.NO_CONTENT:
-                    _state = STATE_END;
-                    _handler.headerComplete();
-                    _handler.messageComplete(_contentPosition);
-
-                    break;
-
-                case HttpTokens.UNKNOWN_CONTENT:
-
-                    _generator.getBodyChunk();
-                    if (_buffers != null && _body == null && _buffer == _header && _header.length() <= 0)
-                    {
-                        _body = _buffers.getBuffer();
-                        _body.clear();
-                    }
-                    _state = STATE_AJP13CHUNK_START;
-                    _handler.headerComplete(); // May recurse here!
-
-                    return total_filled;
-
-                default:
-
-                    if (_buffers != null && _body == null && _buffer == _header && _contentLength > (_header.capacity() - _header.getIndex()))
-                    {
-                        _body = _buffers.getBuffer();
-                        _body.clear();
-
-                    }
-                _state = STATE_AJP13CHUNK_START;
-                _handler.headerComplete(); // May recurse here!
-                return total_filled;
-            }
+            _firstBody = false;
+        }
+        else
+        {
+            _generator.getBodyChunk();
         }
 
-        Buffer chunk;
-
-        while (_state>STATE_END)
+        // read one packet
+        _body.clear();
+        total_filled = this.readOnePacket(_body);
+        if(total_filled<0)
         {
-            switch (_state)
-            {
-                case STATE_AJP13CHUNK_START:
-                    if (_buffer.length()<6)
-                    {
-                        if (total_filled<0) 
-                            total_filled=0;
-                        total_filled+=fill();
-                        if (_buffer.length()<6)
-                            return total_filled;
-                    }
-                    int _magic=Ajp13RequestPacket.getInt(_buffer);
-                    if (_magic!=Ajp13RequestHeaders.MAGIC)
-                    {
-                        throw new IOException("Bad AJP13 rcv packet: "+"0x"+Integer.toHexString(_magic)+" expected "+"0x"
-                                +Integer.toHexString(Ajp13RequestHeaders.MAGIC)+" "+this);
-                    }
-                    _chunkPosition=0;
-                    _chunkLength=Ajp13RequestPacket.getInt(_buffer)-2;
-                    Ajp13RequestPacket.getInt(_buffer);
-                    if (_chunkLength==0)
-                    {
-                        _state=STATE_END;
-                         _generator.gotBody();
-                        _handler.messageComplete(_contentPosition);
-                        return total_filled;
-                    }
-                    _state=STATE_AJP13CHUNK;
-                    break;
-
-                case STATE_AJP13CHUNK:
-                    if (_buffer.length()<_chunkLength)
-                    {
-                        if (total_filled<0) 
-                            total_filled=0;
-                        total_filled+=fill();
-                        if (_buffer.length()<_chunkLength)
-                            return total_filled;
-                    }
-
-                    int remaining=_chunkLength-_chunkPosition;
-                    
-                    if (remaining==0)
-                    {
-                        _state=STATE_AJP13CHUNK_START;
-                        if (_contentPosition<_contentLength)
-                        {
-                            _generator.getBodyChunk();
-                        }
-                        else
-                        {
-                            _generator.gotBody();
-                        }
-
-                        return total_filled;
-                    }
-
-                    if (_buffer.length()<remaining)
-                    {
-                        remaining=_buffer.length();
-                    }
-
-                    chunk=Ajp13RequestPacket.get(_buffer,remaining);
-                    
-                    _contentPosition+=chunk.length();
-                    _chunkPosition+=chunk.length();
-                    _contentView.update(chunk);
-
-                    remaining=_chunkLength-_chunkPosition;
-
-                    if (remaining==0)
-                    {
-                        _state=STATE_AJP13CHUNK_START;
-                        if (_contentPosition<_contentLength || _contentLength == HttpTokens.UNKNOWN_CONTENT)
-                        {
-                            _generator.getBodyChunk();
-                        }
-                        else
-                        {
-                            _generator.gotBody();
-                        }
-                    }
-
-                    _handler.content(chunk);
-
-                return total_filled;
-
-            default:
-                throw new IllegalStateException("Invalid Content State");
-
-            }
-
+            // remote connection closed
+            return -1;
         }
-        
+
+        // No data received. just the header
+        if(_packetLength<=0)
+        {
+            _state=STATE_END;
+            _generator.gotBody();
+           _handler.messageComplete(_contentPosition);
+           return total_filled;
+        }
+
+        // in ajp13 protocol, next 2 bytes is dataLength
+        // also equal to '_packetLength -2'
+        int dataLength = _packetLength - 2;
+        if(dataLength<=0)
+        {
+            _state=STATE_END;
+            _generator.gotBody();
+           _handler.messageComplete(_contentPosition);
+           return total_filled;
+        }
+
+        Buffer chunk = Ajp13RequestPacket.get(_body, dataLength);
+        _contentPosition+=chunk.length();
+        _contentView.update(chunk);
+
+        if (_contentPosition>=_contentLength)
+        {
+            _generator.gotBody();
+        }
+        _handler.content(chunk);
+
+        return total_filled;
+    }
+
+    private int readOnePacket(Buffer bf) throws IOException
+    {
+        int total_filled = fill(bf, 4);
+        if(total_filled<0)
+        {
+            return total_filled;
+        }
+        int _magic = Ajp13RequestPacket.getInt(bf);
+        if (_magic != Ajp13RequestHeaders.MAGIC)
+        {
+            throw new IOException("Bad AJP13 rcv packet: " + "0x" + Integer.toHexString(_magic) + " expected " + "0x" + Integer.toHexString(Ajp13RequestHeaders.MAGIC) + " " + this);
+        }
+        _packetLength = Ajp13RequestPacket.getInt(bf);
+        if (_packetLength > Ajp13Packet.MAX_PACKET_SIZE)
+        {
+            throw new IOException("AJP13 packet (" + _packetLength + "bytes) too large for buffer");
+        }
+        int filled = fill(bf, _packetLength);
+        if(filled<0)
+        {
+            return filled;
+        }
+
+        total_filled += filled;
+        if(LOG.isDebugEnabled())
+        {
+            this.printStatus("read:" + total_filled);
+        }
+
         return total_filled;
     }
 
@@ -614,70 +622,46 @@ public class Ajp13Parser implements Parser
         _state = STATE_START;
         _contentLength = HttpTokens.UNKNOWN_CONTENT;
         _contentPosition = 0;
-        _length = 0;
-        _packetLength = 0;
+        _firstBody = true;
 
-        if (_body!=null && _body.hasContent())
-        {
-            // There is content in the body after the end of the request.
-            // This is probably a pipelined header of the next request, so we need to
-            // copy it to the header buffer.
-            if (_header==null)
-            {
-                _header=_buffers.getHeader();
-                _tok0.update(_header);
-                _tok0.update(0,0);
-                _tok1.update(_header);
-                _tok1.update(0,0);
-            }
-            else
-            {
-                _header.setMarkIndex(-1);
-                _header.compact();
-            }
-            int take=_header.space();
-            if (take>_body.length())
-                take=_body.length();
-            _body.peek(_body.getIndex(),take);
-            _body.skip(_header.put(_body.peek(_body.getIndex(),take)));
+        if (_header != null) {
+            _header.setPutIndex(0);
+            _header.setGetIndex(0);
+            _header.setMarkIndex(-1);
         }
 
-        if (_header!=null)
-            _header.setMarkIndex(-1);
-        if (_body!=null)
+        if (_body != null) {
+            _body.setPutIndex(0);
+            _body.setGetIndex(0);
             _body.setMarkIndex(-1);
+        }
 
-        _buffer=_header;
+        if(LOG.isDebugEnabled())
+        {
+            this.printStatus("reset");
+        }
     }
-
 
     /* ------------------------------------------------------------------------------- */
     public void returnBuffers()
     {
-        if (_body!=null && !_body.hasContent() && _body.markIndex()==-1)
-        {   
-            if (_buffer==_body)
-                _buffer=_header;
-            if (_buffers!=null)
-                _buffers.returnBuffer(_body);
-            _body=null; 
-        }
-
-        if (_header!=null && !_header.hasContent() && _header.markIndex()==-1)
+        if (_buffers != null)
         {
-            if (_buffer==_header)
-                _buffer=null;
-            _buffers.returnBuffer(_header);
-            _header=null;
+            if(_body != null)
+            {
+                _buffers.returnBuffer(_body);
+                _body = null;
+            }
+
+            if(_header != null)
+            {
+                _buffers.returnBuffer(_header);
+                _header = null;
+            }
         }
     }
 
     /* ------------------------------------------------------------------------------- */
-    Buffer getHeaderBuffer()
-    {
-        return _buffer;
-    }
-
     private void shutdownRequest()
     {
         _state = STATE_END;
@@ -693,7 +677,7 @@ public class Ajp13Parser implements Parser
             LOG.warn("AJP13: Validating Secret Word");
             try
             {
-                String secretWord = Ajp13RequestPacket.getString(_buffer, _tok1).toString();
+                String secretWord = Ajp13RequestPacket.getString(_header, _tok1).toString();
 
                 if(!Ajp13SocketConnector.__secretWord.equals(secretWord))
                 {
@@ -841,7 +825,7 @@ public class Ajp13Parser implements Parser
                 _parser.parseNext();
                 
                 // parse until some progress is made (or IOException thrown for timeout)
-                while (_content.length() == 0 && !_parser.isState(Ajp13Parser.STATE_END))
+                while (_content.length() == 0 && _parser.isState(Ajp13Parser.STATE_AJP13CHUNK))
                 {
                     // Try to get more _parser._content
                     _parser.parseNext();
@@ -854,7 +838,7 @@ public class Ajp13Parser implements Parser
 
                 // parse until some progress is made (or
                 // IOException thrown for timeout)
-                while (_content.length() == 0 && !_parser.isState(Ajp13Parser.STATE_END))
+                while (_content.length() == 0 && _parser.isState(Ajp13Parser.STATE_AJP13CHUNK))
                 {
                     // if fill called, but no bytes read,
                     // then block
