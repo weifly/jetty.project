@@ -19,6 +19,7 @@
 package org.eclipse.jetty.ajp;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
@@ -28,6 +29,7 @@ import javax.servlet.ServletInputStream;
 import javax.servlet.http.HttpServletResponse;
 
 import org.eclipse.jetty.http.HttpException;
+import org.eclipse.jetty.http.MimeTypes;
 import org.eclipse.jetty.io.Buffer;
 import org.eclipse.jetty.io.EndPoint;
 import org.eclipse.jetty.server.BlockingHttpConnection;
@@ -45,6 +47,9 @@ import org.eclipse.jetty.util.log.Logger;
 public class Ajp13Connection extends BlockingHttpConnection
 {
     private static final Logger LOG = Log.getLogger(Ajp13Connection.class);
+
+    private ByteArrayOutputStream _uriBuffer = new ByteArrayOutputStream();
+    private String _charset;
 
     public Ajp13Connection(Connector connector, EndPoint endPoint, Server server)
     {
@@ -83,6 +88,8 @@ public class Ajp13Connection extends BlockingHttpConnection
     {
         public void startForwardRequest() throws IOException
         {
+            _uriBuffer.reset();
+            _charset = null;
             _uri.clear();
 	    
             ((Ajp13Request) _request).setSslSecure(false);
@@ -163,7 +170,8 @@ public class Ajp13Connection extends BlockingHttpConnection
 
         public void parsedUri(Buffer uri) throws IOException
         {
-            _uri.parse(uri.toString());
+            _uriBuffer.write(uri.asArray());
+            _uri.parse(_uriBuffer.toByteArray(), 0, _uriBuffer.size());
         }
 
         public void parsedProtocol(Buffer protocol) throws IOException
@@ -210,12 +218,21 @@ public class Ajp13Connection extends BlockingHttpConnection
 
         public void parsedQueryString(Buffer value) throws IOException
         {
-            String u = _uri + "?" + value;
-            _uri.parse(u);
+            _uriBuffer.write('?');
+            _uriBuffer.write(value.asArray());
+            _uri.parse(_uriBuffer.toByteArray(), 0, _uriBuffer.size());
         }
 
         public void parsedHeader(Buffer name, Buffer value) throws IOException
         {
+            int ho = Ajp13RequestHeaders.CACHE.getOrdinal(name);
+            switch (ho)
+            {
+                case Ajp13RequestHeaders.CONTENT_TYPE_ORDINAL:
+                    value = MimeTypes.CACHE.lookup(value);
+                    _charset=MimeTypes.getCharsetFromContentType(value);
+                    break;
+            }
             _requestFields.add(name, value);
         }
 
@@ -234,6 +251,10 @@ public class Ajp13Connection extends BlockingHttpConnection
 
         public void headerComplete() throws IOException
         {
+            if(_charset!=null)
+            {
+                _request.setCharacterEncodingUnchecked(_charset);
+            }
             handleRequest();
         }
 
